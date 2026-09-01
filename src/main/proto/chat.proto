@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "com.example.grpc.chat";
+option java_outer_classname = "ChatProto";
+
+service InternalChatService {
+  // 서버 간 메시지 전달
+  rpc RelayMessage (RelayRequest) returns (RelayResponse);
+}
+
+message RelayRequest {
+  string roomId = 1;
+  string senderId = 2;
+  string message = 3;
+  string recipientId = 4; // 메시지를 받을 클라이언트 ID
+}
+
+//클라이언트의 메시지를 서버 간 전달 시 사용하는 메시지 구조
+message RelayResponse {
+  bool delivered = 1;
+  string message = 2;
+}
