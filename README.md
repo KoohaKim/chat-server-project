@@ -55,11 +55,12 @@ Client (WebSocket)
 여러 인스턴스로 띄울 경우, 인스턴스별로 포트와 Snowflake `nodeId`를 다르게 지정합니다.
 
 ```bash
-# 인스턴스 1
-java -Dserver.port=8080 -Dsnowflake.node-id=0 -jar mini.jar
+# 인스턴스 1 (8081)
+-Dserver.port=8081 -Dsnowflake.node-id=1
 
-# 인스턴스 2
-java -Dserver.port=8081 -Dsnowflake.node-id=1 -jar mini.jar
+# 인스턴스 2 (8082)
+-Dserver.port=8082 -Dsnowflake.node-id=2
+
 ```
 
 사전에 다음이 준비되어 있어야 합니다.
