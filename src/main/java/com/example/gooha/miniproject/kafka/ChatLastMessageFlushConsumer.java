@@ -1,5 +1,6 @@
 package com.example.gooha.miniproject.kafka;
 
+import com.example.gooha.miniproject.service.main.ChatRoomCacheEvictService;
 import com.example.gooha.miniproject.service.message.LastMessageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -20,6 +21,7 @@ public class ChatLastMessageFlushConsumer {
 
     private final RedissonClient redissonClient;
     private final LastMessageService lastMessageService;
+    private final ChatRoomCacheEvictService chatRoomCacheEvictService;
 
     private static final long DEBOUNCE_DELAY_SEC = 3;
     private volatile boolean running = true;
@@ -69,6 +71,8 @@ public class ChatLastMessageFlushConsumer {
 
         try {
             lastMessageService.updateLastMessage(roomId, messageId, shardKey);
+            chatRoomCacheEvictService.evictChatRoomCache(roomId);
+
             log.info("[LastMsgFlush] DB flush 완료 roomId={}, messageId={}, shardKey={}", roomId, messageId, shardKey);
         } catch (Exception e) {
             log.error("[LastMsgFlush] DB flush 실패 roomId={}, messageId={}", roomId, messageId, e);

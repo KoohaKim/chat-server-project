@@ -17,7 +17,8 @@ public class SessionManager {
     private final Map<Long, Set<WebSocketSession>> chatRoomSessions = new ConcurrentHashMap<>();
 
     public void registerSession(Long chatRoomId, WebSocketSession session) {
-        chatRoomSessions.computeIfAbsent(chatRoomId, k -> new HashSet<>()).add(session);
+//        chatRoomSessions.computeIfAbsent(chatRoomId, k -> new HashSet<>()).add(session);
+        chatRoomSessions.computeIfAbsent(chatRoomId, k -> ConcurrentHashMap.newKeySet()).add(session);
         log.info("세션 등록 완료: chatRoomId={}, 세션 ID={}", chatRoomId, session.getId());
 
     }
@@ -25,7 +26,7 @@ public class SessionManager {
     public void removeSession(Long chatRoomId, WebSocketSession session) {
         Set<WebSocketSession> sessions = chatRoomSessions.get(chatRoomId);
 
-        if(session != null) {
+        if(sessions != null) {
             sessions.remove(session);
             log.info("세션 제거 완료: chatRoomId={}, 세션 ID={}", chatRoomId, session.getId());
         }
@@ -34,13 +35,16 @@ public class SessionManager {
     public void broadcast(Long chatRoomId, String message) {
         Set<WebSocketSession> sessions = chatRoomSessions.get(chatRoomId);
 
+        TextMessage textMessage = new TextMessage(message);
         if(sessions != null){
             for(WebSocketSession session : sessions){
                 try {
-                    session.sendMessage(new TextMessage(message));
+                    synchronized (session){
+                        session.sendMessage(textMessage);
+                    }
+
                 } catch (IOException e) {
                     log.error("메시지 전송 실패: 세션 ID={}", session.getId());
-                    throw new RuntimeException(e);
                 }
             }
         }
