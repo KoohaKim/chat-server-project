@@ -42,3 +42,12 @@ out/
 prometheus/
 prometheus/prometheus
 prometheus/promtool
+
+### k6 test results (large files) ###
+src/main/resources/nocache-result.json
+src/main/resources/cache-result.json
+
+
+
+
+.DS_Store

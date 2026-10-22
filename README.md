@@ -4,22 +4,22 @@
 
 카카오톡과 같은 대규모 실시간 채팅 서비스를 클론하며, 여러 기술적 문제들을 직접 부딪혀보기 위해 시작한 프로젝트입니다.
 
-단순히 메시지를 주고받는 채팅 앱을 만드는 것을 넘어서, 실제 서비스 규모에서 필연적으로 마주치는 질문들을 스스로 던지고 답을 찾아가는 과정으로 프로젝트를 설계했습니다.
+단순히 메시지를 주고받는 채팅 앱을 만드는 것을 넘어서, 실제 서비스 규모에서 마주칠 수 있는 질문들을 스스로 던지고 답을 찾아가는 과정으로 프로젝트를 설계했습니다.
 
 - 서버 인스턴스가 여러 대로 늘어나면, 다른 인스턴스에 접속한 유저에게는 메시지를 어떻게 전달할 것인가?
-- 메시지가 계속 쌓이면 하나의 DB로는 감당이 안 될 텐데, 어떻게 나눠 저장하고 조회할 것인가?
-- 여러 서버, 여러 DB에 걸쳐 있어도 메시지 ID가 겹치지 않고, 시간순으로 정렬 가능하려면 어떻게 해야 하는가?
-- 채팅방 목록처럼 자주 조회되는 데이터는 어떻게 해야 매번 무거운 조회 없이 빠르게 응답할 수 있는가?
-- 메시지 전달 도중 장애가 나면, 유실 없이 복구할 수 있는가? 등
+- 메시지가 계속 쌓이면 하나의 DB로는 감당하기 어려운데, 어떻게 나눠 저장하고 조회할 것인가?
+- 여러 서버와 DB에 걸쳐 있어도 메시지 ID가 겹치지 않고 시간순으로 정렬되려면 어떻게 해야 하는가?
+- 채팅방 목록처럼 자주 조회되는 데이터는 매번 무거운 조회를 수행하지 않고 어떻게 빠르게 응답할 수 있는가?
+- 메시지 전달 도중 장애가 발생하면 어떻게 재처리하고 복구할 것인가?
 
-이런 질문에 대해 직접 구조를 설계하고, 구현하고, 부하테스트로 검증하며 답을 찾아가는 방식으로 프로젝트를 진행했습니다.
+이런 질문에 대해 직접 구조를 설계하고, 구현하고, 부하 테스트로 검증하며 답을 찾아가는 방식으로 프로젝트를 진행했습니다.
 
 ## 기술 스택
 
 - **Backend**: Spring Boot, Spring WebSocket, Spring Data JPA
 - **Messaging**: Apache Kafka
 - **Database**: MySQL (메인 DB + 메시지 샤드 DB 2개), HikariCP
-- **Cache / In-memory**: Redis
+- **Cache / In-memory**: Redis, Redisson
 - **인증**: JWT
 - **파일 저장**: AWS S3
 - **모니터링**: Prometheus + Grafana
@@ -27,31 +27,33 @@
 
 ## 아키텍처
 
-```
+```text
 Client (WebSocket)
         │
         ▼
 ┌─────────────────────┐        ┌─────────────────────┐
 │  Server Instance A  │        │  Server Instance B  │
 └─────────┬───────────┘        └──────────┬──────────┘
-          │                               │      메시지 저장 (샤드 DB)
+          │                               │
           ▼                               ▼
-    MySQL (chatRoomId 기준 샤딩)
+     MySQL (chatRoomId 기준 샤딩)
           │
-          │ 저장 커밋 후
+          │ DB 커밋 이후 이벤트 발행
           ▼
    ┌──────────────┐
    │    Kafka     │  ← 인스턴스 간 메시지 릴레이
    └──────┬───────┘
           │
           ▼
-  각 인스턴스의 Consumer → 접속 중인 세션에게 WebSocket 브로드캐스트
+각 인스턴스의 Consumer
+          │
+          ▼
+접속 중인 세션에 WebSocket 브로드캐스트
 ```
+
 - 메시지를 보낸 사용자도 다른 참여자와 동일하게 **Kafka → Consumer → WebSocket 브로드캐스트** 경로로 메시지를 받습니다.
-- 각 인스턴스는 자기에게 접속한 세션만 알고 있으므로(`SessionManager`), 다른 인스턴스의 유저에게는 Kafka를 거쳐 전달됩니다.
-- 메시지 저장(MySQL) → 커밋 후 이벤트 발행 → Kafka를 통한 인스턴스 간 릴레이 → 실시간 브로드캐스트로 이어지는 구조이며, 세부 설계와 그 근거는 기술이력에 정리했습니다.
-
-
+- 각 인스턴스는 자신에게 접속한 세션을 관리합니다. 다른 인스턴스에 접속한 사용자에게는 Kafka를 통해 메시지를 전달합니다.
+- 메시지 저장(MySQL) → 커밋 후 이벤트 발행 → Kafka를 통한 인스턴스 간 릴레이 → 실시간 브로드캐스트로 이어지는 구조이며, 세부 설계와 근거는 아래 핵심 설계 결정에 정리했습니다.
 
 ### DB 구성
 
@@ -59,7 +61,6 @@ Client (WebSocket)
 |---|---|
 | `minimain` | `users`, `chat_rooms`, `chat_room_members`, `chat_room_lastmessage` |
 | `minimessage0`, `minimessage1` | `messages` |
-
 
 ## 핵심 설계 결정
 
@@ -94,55 +95,113 @@ Consumer가 WebSocket 브로드캐스트를 끝낸 **뒤에만** `ack.acknowledg
 - WebSocket **handshake 시점**에 JWT를 검증합니다.
 - 채팅방 참여자는 Redis Set으로 관리합니다.
 - `SessionManager`: 채팅방별 세션 Set을 `ConcurrentHashMap.newKeySet()`으로 관리하고, 세션 단위 `synchronized`로 동시 `sendMessage()` 호출을 막습니다. (WebSocket 생명주기 스레드와 Kafka Consumer 스레드가 같은 세션에 접근할 수 있기 때문입니다.)
-
-
 ## 성능 개선: 채팅방 목록 조회 (`getMyChatRooms`)
 
-k6 부하테스트로 병목을 확인한 뒤 Redis 캐싱을 적용하고, **같은 시나리오·같은 지표**로 전후를 비교했습니다. (500 VUs, 실패율 0% 유지)
+Redis 캐싱 적용 전후의 차이를 확인하기 위해 캐시 비활성화 상태와 활성화 상태에서 동일한 k6 스크립트(`stress-test.js`)를 실행해 비교했습니다.
+
+### 테스트 결과
 
 | 지표 | 캐싱 전 | 캐싱 후 | 개선 |
-|---|---|---|---|
-| avg | 428µs | 159µs | 약 63% |
-| p90 | 1ms | 578µs | 약 42% |
-| p95 | 1.23ms | 682µs | 약 45% |
-| p99 | 2.56ms | 899µs | 약 65% |
-| max | 475ms | 17.1ms | (참고용) |
+|---|---:|---:|---:|
+| 평균 응답 시간 (avg) | 208.94ms | 67.89ms | **약 67.5% 감소** |
+| p90 | 777.56ms | 326.76ms | **약 58.0% 감소** |
+| p95 | 862.94ms | 476.05ms | **약 44.8% 감소** |
+| p99 | 1.01s | 620.90ms | **약 38.5% 감소** |
+| 최대 응답 시간 (max) | 1.37s | 1.80s | 증가 |
+| 초당 요청 수 (RPS) | 295.06 | 368.84 | **약 25.0% 증가** |
+| HTTP 요청 실패율 | 0% | 0% | 동일 |
 
-- 캐시 히트 시 Hibernate 쿼리가 실행되지 않는 것을 로그로 확인했습니다.
-- 데이터가 바뀌면(새 메시지·멤버 변경 등) 이벤트 기반으로 캐시를 무효화합니다.
-- `max`는 단일 샘플이라 변동이 크므로 참고용으로만 봅니다.
-- 측정 조건 
-  - 시나리오: k6, 110초 동안 0 → 50 → 100 → 300 → 500 → 0으로 단계적으로 늘렸다 줄임(요청 간 0.3~0.7초 대기), 총 약 4.6만 요청
-  - 환경: CPU/RAM: 12th Gen Intel(R) Core(TM) i3-12100F / 32GB / 로컬 단일 머신(k6, 애플리케이션, MySQL, Redis 동일머신)
-  - 데이터 규모: users 3 / chat_rooms 4 / chat_room_members 4 / chat_room_last_message 2 / 샤드 messages 1 + 2).
-  - 캐시: Redis , TTL 60초
+### 결과 분석
 
-재현 방법:
+- 캐싱 적용 후 평균 응답 시간이 약 67.5% 감소했습니다.
+- p95 응답 시간은 862.94ms에서 476.05ms로 감소했습니다.
+- 초당 처리량은 약 295건에서 약 369건으로 증가했습니다.
+- 두 테스트 모두 HTTP 요청 실패율 0%, 체크 성공률 100%를 기록했습니다.
+- 캐싱 적용 후에도 p95 400ms 미만이라는 k6 임계값은 충족하지 못했습니다.
+- 최대 응답 시간은 단일 지연의 영향을 크게 받으므로 참고 지표로만 해석합니다.
+
+### 테스트 환경 및 조건
+
+- **환경**: MacBook Air (Apple M2) / 16GB   , 로컬 개발 환경
+- **테스트 도구**: k6
+- **테스트 스크립트**: `stress-test.js`
+- **최대 가상 사용자**: 500 VUs
+- **테스트 시간**: 약 110초
+- **부하 패턴**: 0 → 50 → 100 → 300 → 500 → 0 VUs
+- **캐시 TTL**: 60초
+- **캐시 비활성화**: `app.cache.enabled=false`
+- **캐시 활성화**: `app.cache.enabled=true`
+
+두 테스트는 같은 k6 스크립트와 부하 설정을 사용했으며, 캐시 비활성화 여부를 바꿔 측정했습니다. 요청 수와 RPS는 응답 속도 차이에 따라 달라질 수 있습니다.
+
+### 재현 방법
+
+프로젝트 루트에서 애플리케이션을 실행합니다.
+
+**1. 캐시 비활성화**
+
 ```bash
-k6 run --summary-trend-stats="avg,p(90),p(95),p(99),max" <\gooha.miniproject\src\main\resources\stress-test.js>
+./gradlew bootRun --args='--app.cache.enabled=false'
 ```
 
+다른 터미널에서 `stress-test.js`가 있는 디렉터리로 이동한 뒤 실행합니다.
 
+```bash
+k6 run \
+  --summary-trend-stats="avg,p(90),p(95),p(99),max" \
+  --out json=nocache-result.json \
+  stress-test.js
+```
 
+**2. 캐시 활성화**
+
+기존 애플리케이션을 종료한 뒤 다음 명령어로 다시 실행합니다.
+
+```bash
+./gradlew bootRun --args='--app.cache.enabled=true'
+```
+
+개발용 Redis의 데이터를 초기화할 경우 다음 명령어를 사용할 수 있습니다. 이 명령어는 Redis의 모든 DB에 있는 키를 삭제하므로 다른 기능의 데이터가 없는지 먼저 확인해야 합니다.
+
+```bash
+redis-cli FLUSHALL
+```
+
+테스트 전에 캐시 대상 API를 호출해 캐시를 준비하고, 캐시가 실제로 생성되었는지 확인합니다. 이후 동일한 k6 테스트를 실행합니다.
+
+```bash
+k6 run \
+  --summary-trend-stats="avg,p(90),p(95),p(99),max" \
+  --out json=cache-result.json \
+  stress-test.js
+```
+
+`nocache-result.json`과 `cache-result.json`은 명령어를 실행한 현재 디렉터리에 저장됩니다.
 
 ## 실행 방법
 
 ### 1. 인프라 실행 (MySQL, Kafka, Redis)
+
 ```bash
 docker compose up -d
 ```
+
 `minimain`, `minimessage0`, `minimessage1` 데이터베이스를 생성합니다.
-`src/main/java/com/example/gooha/miniproject/sql/mini.sql`의 DDL을 사용하세요(`messages`는 샤드 DB 두 곳에, 나머지는 `minimain`에 생성).
+
+`src/main/java/com/example/gooha/miniproject/sql/mini.sql`의 DDL을 사용하시면 됩니다. `messages` 테이블은 두 샤드 DB에, 나머지 테이블은 `minimain`에 생성합니다.
 
 ### 2. 설정
-`src/main/resources/application.yaml`에서 아래 값을 본인 환경에 맞게 설정합니다. (DB 계정, Redis/Kafka 주소, JWT secret, S3 버킷)
 
+`src/main/resources/application.yaml`에서 다음 값을 본인 환경에 맞게 설정합니다.
 
-
-
+- DB 계정
+- Redis 및 Kafka 주소
+- JWT secret
+- S3 버킷
 
 ### 3. 빌드 및 실행
-여러 인스턴스로 띄울 경우, 인스턴스별로 포트와 Snowflake `nodeId`를 다르게 지정합니다.
+
+여러 인스턴스로 실행할 경우 인스턴스별 포트와 Snowflake `nodeId`를 다르게 지정합니다.
 
 ```bash
 # 인스턴스 1
@@ -154,5 +213,3 @@ java -Dserver.port=8081 -Dsnowflake.node-id=1 -jar mini.jar
 # 인스턴스 3
 java -Dserver.port=8082 -Dsnowflake.node-id=2 -jar mini.jar
 ```
-
-
